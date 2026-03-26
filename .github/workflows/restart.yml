@@ -1,1 +1,43 @@
 
+name: Remote Auto Restart
+
+on:
+  workflow_dispatch:      # 支持手动点击运行
+  repository_dispatch:    # 支持 Cloudflare Workers 远程调用
+    types: [remote-restart-event]
+  schedule:
+    - cron: '0 */6 * * *'  # 额外配置每 6 小时自动跑一次，双重保险
+
+jobs:
+  restart-task:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Install dependencies
+        run: |
+          npm init -y
+          npm install @playwright/test
+          npx playwright install --with-deps chromium
+
+      - name: 🚀 Run Restart Script
+        run: npx playwright test restart.spec.js
+        env:
+          # 多个 Token 用逗号隔开，存入 Secrets
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          # 格式: CHAT_ID,BOT_TOKEN
+          TG_BOT: ${{ secrets.TG_BOT }}
+
+      - name: 📸 Upload Debug Screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: error.png
+          retention-days: 3
