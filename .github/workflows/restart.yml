@@ -27,7 +27,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: 🚀 Run Restart Script
-        run: npx playwright test restart.spec.js
+        run: npx playwright  restart.spec.js
         env:
           # 多个 Token 用逗号隔开，存入 Secrets
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
