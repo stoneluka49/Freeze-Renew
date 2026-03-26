@@ -410,3 +410,42 @@ try {
     console.log(`  ❌ 重启/唤醒失败: ${err.message}`);
     actionResult = `❌ 操作失败`;
 }
+// 👉 记录操作结果（可选）
+allSummary.push(`  🔧 操作: ${actionResult}`);
+
+} // ✅ 结束 for (serverUrls)
+
+} catch (err) {
+    console.log(`❌ 账号处理失败: ${err.message}`);
+    allSummary.push(`❌ 账号异常: ${err.message.slice(0, 30)}`);
+    globalHasError = true;
+
+} finally {
+    await context.close();
+}
+
+} // ✅ 结束 for (tokens)
+
+
+// ── 推送结果 ─────────────────────────────
+console.log('\n📄 最终执行报告:');
+const finalPushText = allSummary.join('\n');
+console.log(finalPushText);
+
+if (tokens.length > 0) {
+    await sendTG(finalPushText);
+}
+
+if (globalHasError) {
+    throw new Error('部分服务器操作失败');
+}
+
+} catch (e) {
+    await sendTG(`❌ 全局异常：${e.message}`);
+    throw e;
+
+} finally {
+    await browser.close();
+}
+
+});
