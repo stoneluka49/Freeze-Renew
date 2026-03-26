@@ -122,7 +122,7 @@ async function handleOAuthPage(page) {
     console.log(`  ⚠️ handleOAuthPage 结束，URL: ${page.url()}`);
 }
 
-test('FreezeHost 自动续期', async () => {
+test('FreezeHost 自动续期', async ({}, testInfo) => {
     if (tokens.length === 0) {
         throw new Error('❌ 缺少 DISCORD_TOKEN 环境变量，请配置');
     }
@@ -243,11 +243,34 @@ test('FreezeHost 自动续期', async () => {
                 console.log('📤 点击 Login with Discord...');
                 await page.click('span.text-lg:has-text("Login with Discord")');
 
+                console.log('⏳ 检测并关闭 Cookie 同意弹窗...');
+                try {
+                    // FundingChoices / Google CMP 弹窗
+                    const cookieAcceptSelectors = [
+                        'button.fc-cta-consent',
+                        'button.fc-button-label',
+                        '[aria-label="Consent"]',
+                        'button:has-text("同意")',
+                        'button:has-text("Accept")',
+                        'button:has-text("Agree")',
+                        'button:has-text("OK")',
+                    ];
+                    for (const sel of cookieAcceptSelectors) {
+                        const btn = page.locator(sel).first();
+                        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+                            await btn.click({ force: true });
+                            console.log(`  ✅ 已关闭 Cookie 弹窗 (${sel})`);
+                            await page.waitForTimeout(500);
+                            break;
+                        }
+                    }
+                } catch { /* 没有弹窗或已关闭，继续 */ }
+
                 console.log('⏳ 等待服务条款弹窗...');
                 const confirmBtn = page.locator('button#confirm-login');
                 await confirmBtn.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
                 if (await confirmBtn.isVisible()) {
-                    await confirmBtn.click();
+                    await confirmBtn.click({ force: true });
                     console.log('✅ 已接受服务条款');
                 }
 
@@ -428,7 +451,8 @@ test('FreezeHost 自动续期', async () => {
                     // ── 点击外链图标打开续期弹窗 ─────────────────────────
                     console.log('  🔍 查找续期入口...');
                     try {
-                        const externalLinkIcon = page.locator('i.fa-external-link-alt').first();
+                        // 只匹配可见的外链图标，跳过隐藏的 reviewAction 等按钮
+                        const externalLinkIcon = page.locator('i.fa-external-link-alt:visible').first();
                         const parentEl = externalLinkIcon.locator('xpath=..');
                         await parentEl.waitFor({ state: 'visible', timeout: 8000 });
                         await parentEl.hover();
@@ -486,13 +510,16 @@ test('FreezeHost 自动续期', async () => {
             }
         } // End Token Loop
 
-        // ── 发送总体通知 ──────────────────────────────────────
+        // ── 发送总体通知（仅在最后一次尝试时推送，避免重试重复通知） ──
         console.log('\n📄 最终执行报告:');
         const finalPushText = allSummary.join('\n');
         console.log(finalPushText);
-        
-        if (tokens.length > 0) {
+
+        const isLastAttempt = testInfo.retry >= testInfo.project.retries;
+        if (!globalHasError || isLastAttempt) {
             await sendTG(finalPushText);
+        } else {
+            console.log(`⏭️ 检测到错误且非最后一次尝试 (Retry ${testInfo.retry}/${testInfo.project.retries})，跳过 TG 推送`);
         }
 
         if (globalHasError) {
