@@ -37,7 +37,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 + 自动重启（最终版）', async () => {
+test('FreezeHost 自动唤醒 + 自动启动（精简版）', async () => {
 
     if (tokens.length === 0) {
         throw new Error('❌ 未配置 DISCORD_TOKEN');
@@ -107,91 +107,33 @@ test('FreezeHost 自动唤醒 + 自动重启（最终版）', async () => {
                     let actionResult = '';
 
                     try {
-                        console.log('🔍 判断服务器状态...');
+                        // ── 精简逻辑：只判断休眠和停止状态 ──
+                        const isHibernating = await page.locator('text=HIBERNATION').isVisible().catch(() => false);
+                        const hasStartBtn = await page.locator('button:has-text("Start Server")').isVisible().catch(() => false);
 
-                        const isHibernating = await page.locator('text=HIBERNATION')
-                            .isVisible()
-                            .catch(() => false);
-
-                        const hasStartBtn = await page.locator('button:has-text("Start Server")')
-                            .isVisible()
-                            .catch(() => false);
-
-                        const hasStopBtn = await page.locator('button:has-text("Stop Server")')
-                            .isVisible()
-                            .catch(() => false);
-
-                        // 💤 HIBERNATION → 直接唤醒
                         if (isHibernating) {
                             console.log('💤 Hibernation → 唤醒');
-
-                            const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
-                            await wakeBtn.click();
-
+                            await page.locator('button:has-text("Wake Up Server")').first().click();
                             await page.waitForTimeout(8000);
                             actionResult = '⚡ 已唤醒';
-                        }
-
-                        // 🔴 OFFLINE → 启动 + 检查是否需要唤醒
+                        } 
                         else if (hasStartBtn) {
                             console.log('🔴 OFFLINE → 启动');
-
-                            const startBtn = page.locator('button:has-text("Start Server")');
-                            await startBtn.click();
-
+                            await page.locator('button:has-text("Start Server")').click();
                             await page.waitForTimeout(8000);
 
-                            const stillHibernating = await page.locator('text=HIBERNATION')
-                                .isVisible()
-                                .catch(() => false);
-
+                            const stillHibernating = await page.locator('text=HIBERNATION').isVisible().catch(() => false);
                             if (stillHibernating) {
                                 console.log('💤 启动后仍休眠 → 再唤醒');
-
-                                const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
-                                await wakeBtn.click();
-
+                                await page.locator('button:has-text("Wake Up Server")').first().click();
                                 await page.waitForTimeout(8000);
                                 actionResult = '🚀 启动 + ⚡ 唤醒';
                             } else {
                                 actionResult = '🚀 已启动';
                             }
-                        }
-
-                        // 🟢 RUNNING → 重启 + 检查是否需要唤醒
-                        else if (hasStopBtn) {
-                            console.log('🟢 RUNNING → 重启');
-
-                            const stopBtn = page.locator('button:has-text("Stop Server")');
-                            await stopBtn.click();
-
-                            await page.waitForTimeout(8000);
-
-                            const startBtn = page.locator('button:has-text("Start Server")');
-                            await startBtn.waitFor({ state: 'visible', timeout: 15000 });
-                            await startBtn.click();
-
-                            await page.waitForTimeout(8000);
-
-                            const stillHibernating = await page.locator('text=HIBERNATION')
-                                .isVisible()
-                                .catch(() => false);
-
-                            if (stillHibernating) {
-                                console.log('💤 重启后进入休眠 → 再唤醒');
-
-                                const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
-                                await wakeBtn.click();
-
-                                await page.waitForTimeout(8000);
-                                actionResult = '🔁 重启 + ⚡ 唤醒';
-                            } else {
-                                actionResult = '🔁 已重启';
-                            }
-                        }
-
+                        } 
                         else {
-                            actionResult = '❓ 未识别状态';
+                            actionResult = '🟢 运行中，无需操作';
                         }
 
                     } catch (err) {
