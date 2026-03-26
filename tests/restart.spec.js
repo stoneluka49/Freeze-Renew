@@ -1,7 +1,7 @@
+// tests/freeze.spec.js
 const { test, expect, chromium } = require('@playwright/test');
 const https = require('https');
 
-// 配置信息
 const tokensInput = process.env.DISCORD_TOKEN || '';
 const tokens = tokensInput.split(',').map(t => t.trim()).filter(Boolean);
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
@@ -9,142 +9,404 @@ const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 const TIMEOUT = 60000;
 
 function nowStr() {
-    return new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    return new Date().toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).replace(/\//g, '-');
 }
 
-async function sendTG(result) {
-    if (!TG_CHAT_ID || !TG_TOKEN) return;
-    const msg = [`🎮 FreezeHost 拉起报告`, `🕐 时间: ${nowStr()}`, `========================`, result].join('\n');
-    const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: msg });
+function sendTG(result) {
     return new Promise((resolve) => {
+        if (!TG_CHAT_ID || !TG_TOKEN) {
+            console.log('⚠️ TG_BOT 未配置，跳过推送');
+            return resolve();
+        }
+
+        const msg = [
+            `🎮 FreezeHost 续期报告`,
+            `🕐 时间: ${nowStr()}`,
+            `========================`,
+            `${result}`,
+            `🌐 官网入口: https://free.freezehost.pro`
+        ].join('\n');
+
+        const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: msg });
         const req = https.request({
-            hostname: 'api.telegram.org', path: `/bot${TG_TOKEN}/sendMessage`,
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-        }, resolve);
-        req.on('error', resolve);
-        req.write(body); req.end();
+            hostname: 'api.telegram.org',
+            path: `/bot${TG_TOKEN}/sendMessage`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        }, (res) => {
+            if (res.statusCode === 200) {
+                console.log('📨 TG 推送成功');
+            } else {
+                console.log(`⚠️ TG 推送失败：HTTP ${res.statusCode}`);
+            }
+            resolve();
+        });
+
+        req.on('error', (e) => {
+            console.log(`⚠️ TG 推送异常：${e.message}`);
+            resolve();
+        });
+
+        req.setTimeout(15000, () => {
+            console.log('⚠️ TG 推送超时');
+            req.destroy();
+            resolve();
+        });
+
+        req.write(body);
+        req.end();
     });
 }
 
-// 处理 Discord 授权确认页
 async function handleOAuthPage(page) {
-    for (let i = 0; i < 5; i++) {
-        if (!page.url().includes('discord.com')) return;
-        try {
-            const authBtn = page.locator('button:has-text("Authorize"), button:has-text("授权")').last();
-            if (await authBtn.isVisible({ timeout: 5000 })) {
-                await authBtn.click();
-                await page.waitForTimeout(3000);
-            }
-        } catch { break; }
+    console.log(`  📄 当前 URL: ${page.url()}`);
+    await page.waitForTimeout(3000);
+
+    const selectors = [
+        'button:has-text("Authorize")',
+        'button:has-text("授权")',
+        'button[type="submit"]',
+        'div[class*="footer"] button',
+        'button[class*="primary"]',
+    ];
+
+    for (let i = 0; i < 8; i++) {
+        console.log(`  🔄 第 ${i + 1} 次尝试，URL: ${page.url()}`);
+
+        if (!page.url().includes('discord.com')) {
+            console.log('  ✅ 已离开 Discord');
+            return;
+        }
+
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.waitForTimeout(500);
+
+        for (const selector of selectors) {
+            try {
+                const btn = page.locator(selector).last();
+                const visible = await btn.isVisible();
+                if (!visible) continue;
+
+                const text = (await btn.innerText()).trim();
+                console.log(`  🔘 找到按钮: "${text}" (${selector})`);
+
+                if (text.includes('取消') || text.toLowerCase().includes('cancel') ||
+                    text.toLowerCase().includes('deny')) continue;
+
+                const disabled = await btn.isDisabled();
+                if (disabled) {
+                    console.log('  ⏳ 按钮 disabled，等待...');
+                    break;
+                }
+
+                await btn.click();
+                console.log(`  ✅ 已点击: "${text}"`);
+                await page.waitForTimeout(2000);
+
+                if (!page.url().includes('discord.com')) {
+                    console.log('  ✅ 授权成功，已跳转');
+                    return;
+                }
+                break;
+            } catch { continue; }
+        }
+
+        await page.waitForTimeout(2000);
     }
+
+    console.log(`  ⚠️ handleOAuthPage 结束，URL: ${page.url()}`);
 }
 
-test('FreezeHost 自动拉起与重启', async () => {
-    if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
+test('FreezeHost 自动续期', async () => {
+    if (tokens.length === 0) {
+        throw new Error('❌ 缺少 DISCORD_TOKEN 环境变量，请配置');
+    }
 
-    const browser = await chromium.launch({ headless: true });
-    let allSummary = [];
-
-    for (let tIndex = 0; tIndex < tokens.length; tIndex++) {
-        let currentToken = tokens[tIndex];
-        let customName = `账号 ${tIndex + 1}`;
-
-        if (currentToken.includes('#')) {
-            [customName, currentToken] = currentToken.split('#');
-        }
-
-        const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' });
-        const page = await context.newPage();
-        page.setDefaultTimeout(TIMEOUT);
-
+    let proxyConfig = undefined;
+    if (process.env.GOST_PROXY) {
         try {
-            console.log(`🚀 正在处理: ${customName}`);
-
-            // 1. 注入 Token (修复 ReferenceError 的核心逻辑)
-            await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
-            
-            await page.evaluate(async (token) => {
-                // 定义轮询检查函数
-                const checkStorage = () => {
-                    return new Promise((resolve) => {
-                        const interval = setInterval(() => {
-                            if (typeof localStorage !== 'undefined') {
-                                clearInterval(interval);
-                                resolve();
-                            }
-                        }, 100);
-                    });
-                };
-                await checkStorage();
-                
-                // 注入 Token 到 localStorage
-                localStorage.setItem('token', `"${token}"`);
-                // 辅助注入：部分环境下 Discord 校验 iframe 存储
-                const iframe = document.createElement('iframe');
-                document.body.appendChild(iframe);
-                if (iframe.contentWindow) {
-                    iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
-                }
-            }, currentToken);
-
-            // 2. 验证登录并前往 FreezeHost
-            await page.goto('https://discord.com/channels/@me', { waitUntil: 'networkidle' });
-            if (page.url().includes('login')) throw new Error('Token 已失效');
-
-            await page.goto('https://free.freezehost.pro/dashboard', { waitUntil: 'networkidle' });
-
-            // 3. 处理登录/授权确认
-            if (await page.locator('span:has-text("Login with Discord")').isVisible()) {
-                await page.click('span:has-text("Login with Discord")');
-                const confirmBtn = page.locator('button#confirm-login');
-                if (await confirmBtn.isVisible({ timeout: 5000 })) await confirmBtn.click();
-                await handleOAuthPage(page);
-            }
-
-            await page.waitForURL(/dashboard/, { timeout: 20000 });
-            
-            // 4. 操作服务器
-            const serverUrls = await page.evaluate(() => {
-                return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
+            const http = require('http');
+            await new Promise((resolve, reject) => {
+                const req = http.request(
+                    { host: '127.0.0.1', port: 8080, path: '/', method: 'GET', timeout: 3000 },
+                    () => resolve()
+                );
+                req.on('error', reject);
+                req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+                req.end();
             });
-
-            allSummary.push(`👤 ${customName}`);
-            for (const sUrl of serverUrls) {
-                await page.goto(sUrl, { waitUntil: 'networkidle' });
-                await page.waitForTimeout(5000);
-
-                const serverName = await page.title().then(t => t.replace('Dashboard - ', ''));
-                const wakeUpBtn = page.locator('button:has-text("WAKE UP SERVER")');
-                const startBtn = page.locator('button:has-text("Start")').first();
-                const restartBtn = page.locator('button:has-text("Restart")').first();
-
-                let action = "跳过";
-                if (await wakeUpBtn.isVisible()) {
-                    await wakeUpBtn.click();
-                    action = "🌙 已唤醒";
-                } else if (await startBtn.isVisible() && await startBtn.isEnabled()) {
-                    await startBtn.click();
-                    action = "🚀 已启动";
-                } else if (await restartBtn.isVisible()) {
-                    await restartBtn.click();
-                    const confirm = page.locator('button:has-text("Confirm")');
-                    if (await confirm.isVisible({ timeout: 3000 })) await confirm.click();
-                    action = "🔄 已重启";
-                }
-                allSummary.push(`  ├─ ${serverName}: ${action}`);
-            }
-
-        } catch (err) {
-            console.error(`❌ ${customName} 失败:`, err.message);
-            await page.screenshot({ path: `error-${tIndex}.png` });
-            allSummary.push(`  ❌ 账号出错: ${err.message.slice(0, 30)}`);
-        } finally {
-            await context.close();
+            proxyConfig = { server: process.env.GOST_PROXY };
+            console.log('🛡️ 本地代理连通，使用 GOST 转发');
+        } catch {
+            console.log('⚠️ 本地代理不可达，降级为直连');
         }
     }
 
-    const report = allSummary.join('\n');
-    await sendTG(report);
-    await browser.close();
-});
+    console.log(`🔧 启动浏览器 (共需处理 ${tokens.length} 个账号)...`);
+    const browser = await chromium.launch({
+        headless: true,
+        proxy: proxyConfig,
+    });
+
+    try {
+        // ── 出口 IP 验证（仅测一次） ─────────────────────────
+        console.log('🌐 验证出口 IP...');
+        try {
+            const ipPage = await browser.newPage();
+            const res = await ipPage.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded', timeout: 10000 });
+            const body = await res.text();
+            const ip = JSON.parse(body).ip || body;
+            const masked = ip.replace(/(\d+\.\d+\.\d+\.)\d+/, '$1xx');
+            console.log(`✅ 出口 IP 确认：${masked}`);
+            await ipPage.close();
+        } catch {
+            console.log('⚠️ IP 验证超时，跳过');
+        }
+
+        let allSummary = [];
+        let globalHasError = false;
+
+        // ── 遍历处理每个 Token 账号 ─────────────────────────
+        for (let tIndex = 0; tIndex < tokens.length; tIndex++) {
+            let currentToken = tokens[tIndex];
+            let customName = null;
+
+            // 支持 '自定义备注#Token' 或 '自定义备注:Token' 的格式
+            const match = currentToken.match(/^([^#:]+)[#:](.+)$/);
+            if (match) {
+                customName = match[1].trim();
+                currentToken = match[2].trim();
+            }
+
+            let accountLabel = customName ? `👤 ${customName}` : `👤 账号 ${tIndex + 1}`;
+            
+            console.log('\n' + '='.repeat(50));
+            console.log(`🚀 开始处理 ${accountLabel}`);
+            console.log('='.repeat(50));
+
+            // 每个账号使用独立的上下文，隔离 Cookie 和 LocalStorage
+            const context = await browser.newContext();
+            const page = await context.newPage();
+            page.setDefaultTimeout(TIMEOUT);
+            
+            try {
+                // ── 预登录 Discord ────────────────────────────────────
+                console.log('🔑 使用 Token 预登录 Discord...');
+                await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
+                
+                await page.evaluate((token) => {
+                    const iframe = document.createElement('iframe');
+                    document.body.appendChild(iframe);
+                    iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
+                }, currentToken);
+                
+                console.log('🔄 刷新页面验证 Token...');
+                await page.waitForTimeout(1000);
+                await page.reload({ waitUntil: 'domcontentloaded' });
+                await page.waitForTimeout(3000);
+                
+                if (page.url().includes('login')) {
+                    throw new Error('Discord Token 失效或被踢出，登录失败');
+                }
+                console.log('✅ Discord Token 验证有效...');
+
+                // ── 尝试自动读取 Discord 账号名 ─────────────────────
+                try {
+                    const autoName = await page.evaluate(async (tok) => {
+                        try {
+                            const res = await fetch('https://discord.com/api/v9/users/@me', {
+                                headers: { 'Authorization': tok }
+                            });
+                            if (!res.ok) return null;
+                            const data = await res.json();
+                            return data.global_name || data.username || data.email || null;
+                        } catch(err) { return null; }
+                    }, currentToken);
+                    
+                    if (autoName) {
+                        console.log(`🤖 成功抓取 Discord 档案: ${autoName}`);
+                        if (!customName) {
+                            accountLabel = `👤 ${autoName}`;
+                        }
+                    }
+                } catch (e) { }
+
+                // ── 登录 FreezeHost ───────────────────────────────────
+                console.log('🔑 打开 FreezeHost 登录页...');
+                await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
+
+                console.log('📤 点击 Login with Discord...');
+                await page.click('span.text-lg:has-text("Login with Discord")');
+
+                console.log('⏳ 等待服务条款弹窗...');
+                const confirmBtn = page.locator('button#confirm-login');
+                await confirmBtn.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+                if (await confirmBtn.isVisible()) {
+                    await confirmBtn.click();
+                    console.log('✅ 已接受服务条款');
+                }
+
+                // ── OAuth 授权 ────────────────────────────────────────
+                console.log('⏳ 等待 OAuth 授权...');
+                try {
+                    await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 6000 });
+                    console.log('🔍 进入 OAuth 授权页，处理中...');
+                    await page.waitForTimeout(2000);
+                    
+                    if (page.url().includes('discord.com')) {
+                        await handleOAuthPage(page);
+                    } else {
+                        console.log('✅ 已自动完成授权，无需手动点击');
+                    }
+                    
+                    await page.waitForURL(/free\.freezehost\.pro/, { timeout: 15000 });
+                    console.log(`✅ 已离开 Discord，当前：${page.url()}`);
+                } catch {
+                    console.log(`✅ 静默授权或已跳转，当前：${page.url()}`);
+                }
+
+                // ── 确认到达 Dashboard ────────────────────────────────
+                console.log('⏳ 确认到达 Dashboard...');
+                try {
+                    await page.waitForURL(
+                        url => url.includes('/callback') || url.includes('/dashboard'),
+                        { timeout: 10000 }
+                    );
+                } catch { /* 可能已经在 dashboard */ }
+
+                if (page.url().includes('/callback')) {
+                    await page.waitForURL(/free\.freezehost\.pro\/dashboard/);
+                }
+
+                if (!page.url().includes('/dashboard')) {
+                    throw new Error(`未到达 Dashboard，当前 URL: ${page.url()}`);
+                }
+                console.log(`✅ 登录成功！当前：${page.url()}`);
+                await page.waitForTimeout(3000);
+
+                // ── 提取金币余额 ──────────────────────────────────────
+                console.log('🔍 提取当前金币余额...');
+                let coins = '未知';
+                try {
+                    const coinText = await page.evaluate(() => {
+                        // 1. 尝试精确定位 "AVAILABLE BALANCE"
+                        const allEls = Array.from(document.querySelectorAll('*'));
+                        const balEl = allEls.find(e => e.children.length === 0 && e.textContent.includes('AVAILABLE BALANCE'));
+                        if (balEl) {
+                            let p = balEl.parentElement;
+                            while(p && p.innerText.length < 200) {
+                                if (/\d/.test(p.innerText)) return p.innerText;
+                                p = p.parentElement;
+                            }
+                        }
+                        // 2. 尝试找 .fa-coins
+                        const coinIcon = document.querySelector('.fa-coins');
+                        if (coinIcon && coinIcon.parentElement) return coinIcon.parentElement.innerText.trim();
+                        // 3. Fallback: 找含有 Coins 的短文本
+                        const elements = Array.from(document.querySelectorAll('span, div, p, h1, h2, h3, h4, h5, h6, b, strong'));
+                        for (const el of elements) {
+                            if (el.innerText && el.innerText.includes('Coins') && el.innerText.length < 20) return el.innerText.trim();
+                        }
+                        return '未知';
+                    });
+                    
+                    const matches = coinText.match(/[\d,]+(\.\d+)?/g);
+                    if (matches) {
+                        // 取出最长的一串数字（如 2,078）
+                        coins = matches.reduce((longest, current) => current.length > longest.length ? current : longest, matches[0]);
+                    }
+                    console.log(`💰 当前金币: ${coins}`);
+                } catch (e) {
+                    console.log('⚠️ 获取金币失败');
+                }
+                
+                const prefix = tIndex === 0 ? '' : '\n';
+                allSummary.push(`${prefix}${accountLabel} | 💰 ${coins}`);
+
+                // ── 查找所有 Server Console 链接 ───────────────────────
+                console.log('🔍 查找所有 Server 的 Manage 按钮...');
+                const serverUrls = await page.evaluate(() => {
+                    const links = Array.from(document.querySelectorAll('a[href*="server-console"]'));
+                    return links.map(link => link.href);
+                });
+
+                if (serverUrls.length === 0) {
+                    allSummary.push(`  ❌ 获取服务器列表失败或为空\n`);
+                    console.log('⚠️ 未找到任何服务器');
+                    continue; 
+                }
+
+                console.log(`✅ 共找到 ${serverUrls.length} 个服务器`);
+
+                // ── 遍历处理该账号下的每个 Server ─────────────────────
+                for (let i = 0; i < serverUrls.length; i++) {
+                    const sUrl = serverUrls[i];
+                    console.log(`\n▶️ 开始处理第 ${i + 1}/${serverUrls.length} 个服务器`);
+                    console.log(`  🔗 ${sUrl}`);
+                    await page.goto(sUrl, { waitUntil: 'domcontentloaded' });
+                    await page.waitForTimeout(3000);
+                    
+    console.log('  🔄 检查服务器状态...');
+
+let actionResult = '';
+
+try {
+    // ── 判断是否休眠 ─────────────────────────
+    const isHibernating = await page.locator('text=HIBERNATION')
+        .isVisible()
+        .catch(() => false);
+
+    if (isHibernating) {
+        console.log('  😴 服务器处于休眠，执行唤醒...');
+
+        const wakeBtn = page.locator('button:has-text("Wake Up Server")');
+
+        await wakeBtn.waitFor({ state: 'visible', timeout: 10000 });
+        await wakeBtn.click();
+
+        console.log('  ⚡ 已点击 Wake Up Server');
+
+        // 等待启动
+        await page.waitForTimeout(8000);
+
+        actionResult = '⚡ 已唤醒';
+
+    } else {
+        console.log('  🟢 服务器运行中，执行重启...');
+
+        // ── 1️⃣ 停止服务器 ─────────────────────
+        const stopBtn = page.locator('button:has-text("Stop Server")');
+
+        await stopBtn.waitFor({ state: 'visible', timeout: 10000 });
+        await stopBtn.click();
+
+        console.log('  ⛔ 已点击 Stop Server');
+
+        // 等待停止状态
+        await page.waitForTimeout(8000);
+
+        // ── 2️⃣ 启动服务器 ─────────────────────
+        const startBtn = page.locator(
+            'button:has-text("Wake Up Server"), button:has-text("Start Server")'
+        );
+
+        await startBtn.waitFor({ state: 'visible', timeout: 15000 });
+        await startBtn.first().click();
+
+        console.log('  🚀 已重新启动服务器');
+
+        // 等待启动完成
+        await page.waitForTimeout(8000);
+
+        actionResult = '🔁 已重启';
+    }
+
+} catch (err) {
+    console.log(`  ❌ 重启/唤醒失败: ${err.message}`);
+    actionResult = `❌ 操作失败`;
+}
