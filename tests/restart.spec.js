@@ -3,6 +3,7 @@ const https = require('https');
 
 const tokensInput = process.env.DISCORD_TOKEN || '';
 const tokens = tokensInput.split(',').map(t => t.trim()).filter(Boolean);
+
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 60000;
@@ -10,7 +11,7 @@ const TIMEOUT = 60000;
 function nowStr() {
     return new Date().toLocaleString('zh-CN', {
         timeZone: 'Asia/Shanghai',
-        hour12: false
+        hour12: false,
     });
 }
 
@@ -36,21 +37,20 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 / 自动重启', async () => {
+test('FreezeHost 自动唤醒 + 自动重启（最终版）', async () => {
 
     if (tokens.length === 0) {
-        throw new Error('未配置 DISCORD_TOKEN');
+        throw new Error('❌ 未配置 DISCORD_TOKEN');
     }
 
-    const browser = await chromium.launch({
-        headless: true
-    });
+    const browser = await chromium.launch({ headless: true });
 
     let summary = [];
 
     try {
-
         for (let i = 0; i < tokens.length; i++) {
+
+            console.log(`🚀 开始处理账号 ${i + 1}`);
 
             const context = await browser.newContext();
             const page = await context.newPage();
@@ -59,9 +59,7 @@ test('FreezeHost 自动唤醒 / 自动重启', async () => {
             let result = '';
 
             try {
-
-                console.log('登录 Discord...');
-
+                // ── Discord Token 登录 ──
                 await page.goto('https://discord.com/login');
 
                 await page.evaluate(token => {
@@ -71,15 +69,17 @@ test('FreezeHost 自动唤醒 / 自动重启', async () => {
                 }, tokens[i]);
 
                 await page.reload();
-                await page.waitForTimeout(4000);
+                await page.waitForTimeout(3000);
 
                 if (page.url().includes('login')) {
                     throw new Error('Token 失效');
                 }
 
-                console.log('登录 FreezeHost...');
+                console.log('✅ Discord 登录成功');
 
+                // ── 登录 FreezeHost ──
                 await page.goto('https://free.freezehost.pro');
+
                 await page.click('text=Login with Discord');
 
                 const confirm = page.locator('#confirm-login');
@@ -89,109 +89,137 @@ test('FreezeHost 自动唤醒 / 自动重启', async () => {
 
                 await page.waitForTimeout(5000);
 
+                // ── 获取服务器列表 ──
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]'))
                         .map(a => a.href);
                 });
 
-                if (serverUrls.length === 0) {
-                    result = '未找到服务器';
-                }
+                console.log(`🔧 找到 ${serverUrls.length} 个服务器`);
 
                 for (const url of serverUrls) {
 
-                    console.log('处理服务器:', url);
-
                     await page.goto(url);
-                    await page.waitForTimeout(4000);
+                    await page.waitForTimeout(3000);
+
+                    console.log(`🔧 处理服务器: ${url}`);
 
                     let actionResult = '';
 
                     try {
+                        console.log('🔍 判断服务器状态...');
 
                         const isHibernating = await page.locator('text=HIBERNATION')
                             .isVisible()
                             .catch(() => false);
 
-                        const hasStart = await page.locator('button:has-text("Start Server")')
+                        const hasStartBtn = await page.locator('button:has-text("Start Server")')
                             .isVisible()
                             .catch(() => false);
 
-                        const hasStop = await page.locator('button:has-text("Stop Server")')
+                        const hasStopBtn = await page.locator('button:has-text("Stop Server")')
                             .isVisible()
                             .catch(() => false);
 
+                        // 💤 HIBERNATION → 直接唤醒
                         if (isHibernating) {
-
-                            console.log('服务器休眠 → 唤醒');
+                            console.log('💤 Hibernation → 唤醒');
 
                             const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
                             await wakeBtn.click();
 
                             await page.waitForTimeout(8000);
-                            actionResult = '已唤醒';
+                            actionResult = '⚡ 已唤醒';
                         }
 
-                        else if (hasStart) {
+                        // 🔴 OFFLINE → 启动 + 检查是否需要唤醒
+                        else if (hasStartBtn) {
+                            console.log('🔴 OFFLINE → 启动');
 
-                            console.log('服务器 OFFLINE → 启动');
-
-                            const startBtn = page.locator('button:has-text("Start Server")').first();
+                            const startBtn = page.locator('button:has-text("Start Server")');
                             await startBtn.click();
 
                             await page.waitForTimeout(8000);
-                            actionResult = '已启动';
+
+                            const stillHibernating = await page.locator('text=HIBERNATION')
+                                .isVisible()
+                                .catch(() => false);
+
+                            if (stillHibernating) {
+                                console.log('💤 启动后仍休眠 → 再唤醒');
+
+                                const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
+                                await wakeBtn.click();
+
+                                await page.waitForTimeout(8000);
+                                actionResult = '🚀 启动 + ⚡ 唤醒';
+                            } else {
+                                actionResult = '🚀 已启动';
+                            }
                         }
 
-                        else if (hasStop) {
+                        // 🟢 RUNNING → 重启 + 检查是否需要唤醒
+                        else if (hasStopBtn) {
+                            console.log('🟢 RUNNING → 重启');
 
-                            console.log('服务器 RUNNING → 重启');
-
-                            const stopBtn = page.locator('button:has-text("Stop Server")').first();
+                            const stopBtn = page.locator('button:has-text("Stop Server")');
                             await stopBtn.click();
 
                             await page.waitForTimeout(8000);
 
-                            const startBtn = page.locator('button:has-text("Start Server")').first();
+                            const startBtn = page.locator('button:has-text("Start Server")');
                             await startBtn.waitFor({ state: 'visible', timeout: 15000 });
                             await startBtn.click();
 
                             await page.waitForTimeout(8000);
 
-                            actionResult = '已重启';
+                            const stillHibernating = await page.locator('text=HIBERNATION')
+                                .isVisible()
+                                .catch(() => false);
+
+                            if (stillHibernating) {
+                                console.log('💤 重启后进入休眠 → 再唤醒');
+
+                                const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
+                                await wakeBtn.click();
+
+                                await page.waitForTimeout(8000);
+                                actionResult = '🔁 重启 + ⚡ 唤醒';
+                            } else {
+                                actionResult = '🔁 已重启';
+                            }
                         }
 
                         else {
-                            actionResult = '状态未知';
+                            actionResult = '❓ 未识别状态';
                         }
 
                     } catch (err) {
+                        actionResult = '❌ 操作失败';
                         console.log(err.message);
-                        actionResult = '操作失败';
                     }
 
                     result += `\n${url}\n${actionResult}\n`;
                 }
 
             } catch (err) {
-                result = `失败: ${err.message}`;
+                result = `❌ 登录失败: ${err.message}`;
             }
 
-            summary.push(`账号${i + 1}\n${result}`);
+            summary.push(`👤 账号${i + 1}\n${result}`);
 
             await context.close();
         }
 
-        const report = [
-            'FreezeHost 运行报告',
-            nowStr(),
+        const finalText = [
+            '🎮 FreezeHost 自动运行报告',
+            `🕒 ${nowStr()}`,
             '================',
             summary.join('\n')
         ].join('\n');
 
-        console.log(report);
-
-        await sendTG(report);
+        console.log(finalText);
+        await sendTG(finalText);
 
     } finally {
         await browser.close();
