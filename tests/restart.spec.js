@@ -37,7 +37,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 + 自动启动（精简版）', async () => {
+test('FreezeHost 自动唤醒 + 自动启动（支持hibernation和sleep）', async () => {
 
     if (tokens.length === 0) {
         throw new Error('❌ 未配置 DISCORD_TOKEN');
@@ -107,12 +107,12 @@ test('FreezeHost 自动唤醒 + 自动启动（精简版）', async () => {
                     let actionResult = '';
 
                     try {
-                        // ── 精简逻辑：只判断休眠和停止状态 ──
-                        const isHibernating = await page.locator('text=HIBERNATION').isVisible().catch(() => false);
+                        // ── 修复：匹配包含 "hibernation" 或 "sleep" 的文本，不区分大小写 ──
+                        const isHibernating = await page.locator('text=/hibernation|sleep/i').isVisible().catch(() => false);
                         const hasStartBtn = await page.locator('button:has-text("Start Server")').isVisible().catch(() => false);
 
                         if (isHibernating) {
-                            console.log('💤 Hibernation → 唤醒');
+                            console.log('💤 休眠状态 → 唤醒');
                             await page.locator('button:has-text("Wake Up Server")').first().click();
                             await page.waitForTimeout(8000);
                             actionResult = '⚡ 已唤醒';
@@ -122,7 +122,7 @@ test('FreezeHost 自动唤醒 + 自动启动（精简版）', async () => {
                             await page.locator('button:has-text("Start Server")').click();
                             await page.waitForTimeout(8000);
 
-                            const stillHibernating = await page.locator('text=HIBERNATION').isVisible().catch(() => false);
+                            const stillHibernating = await page.locator('text=/hibernation|sleep/i').isVisible().catch(() => false);
                             if (stillHibernating) {
                                 console.log('💤 启动后仍休眠 → 再唤醒');
                                 await page.locator('button:has-text("Wake Up Server")').first().click();
