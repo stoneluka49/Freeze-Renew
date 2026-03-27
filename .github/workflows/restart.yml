@@ -5,7 +5,7 @@ on:
   repository_dispatch:    # 支持 Cloudflare Workers 远程调用
     types: [remote-restart-event]
   schedule:
-    - cron: '0 */4 * * *'  # 额外配置每 4小时自动跑一次，双重保险
+    - cron: '0 */6 * * *'  # 额外配置每 6小时自动跑一次，双重保险
 
 jobs:
   restart-task:
