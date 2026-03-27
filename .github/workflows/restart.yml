@@ -4,8 +4,8 @@ on:
   workflow_dispatch:      # 支持手动点击运行
   repository_dispatch:    # 支持 Cloudflare Workers 远程调用
     types: [remote-restart-event]
-  #schedule:
-    #- cron: '0 */6 * * *'  # 额外配置每 6 小时自动跑一次，双重保险
+  schedule:
+    - cron: '0 */4 * * *'  # 额外配置每 4小时自动跑一次，双重保险
 
 jobs:
   restart-task:
