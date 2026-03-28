@@ -1,9 +1,9 @@
 const { test, chromium } = require('@playwright/test');
 const https = require('https');
 
+// ── 环境变量配置 ──
 const tokensInput = process.env.DISCORD_TOKEN || '';
 const tokens = tokensInput.split(',').map(t => t.trim()).filter(Boolean);
-
 const [TG_CHAT_ID, TG_TOKEN] = (process.env.TG_BOT || ',').split(',');
 
 const TIMEOUT = 60000;
@@ -15,168 +15,144 @@ function nowStr() {
     });
 }
 
+/**
+ * 发送美化后的 Telegram 消息 (HTML 模式)
+ */
 function sendTG(text) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
-
         const body = JSON.stringify({
             chat_id: TG_CHAT_ID,
-            text
+            text,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
         });
-
         const req = https.request({
             hostname: 'api.telegram.org',
             path: `/bot${TG_TOKEN}/sendMessage`,
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
         }, () => resolve());
-
         req.on('error', () => resolve());
         req.write(body);
         req.end();
     });
 }
 
-test('FreezeHost 自动唤醒 + 详细日志诊断版', async () => {
-
-    if (tokens.length === 0) {
-        throw new Error('❌ 未配置 DISCORD_TOKEN');
-    }
+test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
+    if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
 
     const browser = await chromium.launch({ headless: true });
-    let summary = [];
+    let accountReports = [];
+    let totalStats = { servers: 0, actions: 0, failed: 0 };
 
     try {
         for (let i = 0; i < tokens.length; i++) {
-            console.log(`\n================================`);
-            console.log(`🚀 开始处理账号 ${i + 1} / ${tokens.length}`);
-            console.log(`================================`);
-
             const context = await browser.newContext();
             const page = await context.newPage();
             page.setDefaultTimeout(TIMEOUT);
 
-            let result = '';
+            let serverResults = [];
+            console.log(`\n🚀 [${i + 1}/${tokens.length}] 正在处理账号...`);
 
             try {
-                // ── Discord Token 登录 ──
-                await page.goto('https://discord.com/login');
-                await page.evaluate(token => {
-                    const iframe = document.createElement('iframe');
-                    document.body.appendChild(iframe);
-                    iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
+                // 1. 稳健的 Discord Token 注入
+                await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
+                await page.evaluate(async (token) => {
+                    localStorage.setItem('token', `"${token}"`);
                 }, tokens[i]);
+                
+                // 注入后跳转到 app 页面验证登录
+                await page.goto('https://discord.com/app', { waitUntil: 'networkidle' });
+                await page.waitForTimeout(3000);
 
-                await page.reload();
-                await page.waitForTimeout(5000);
-
-                if (page.url().includes('login')) {
-                    throw new Error('Token 可能已失效或需要人机验证');
-                }
+                if (page.url().includes('login')) throw new Error('Token 注入失败或已失效');
                 console.log('✅ Discord 登录成功');
 
-                // ── 登录 FreezeHost ──
-                await page.goto('https://free.freezehost.pro');
-                await page.click('text=Login with Discord');
+                // 2. 授权进入 FreezeHost
+                await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
+                
+                // 监听跳转，防止上下文销毁报错
+                await Promise.all([
+                    page.waitForNavigation({ waitUntil: 'networkidle' }).catch(() => {}),
+                    page.click('text=Login with Discord', { timeout: 15000 })
+                ]);
 
-                const confirm = page.locator('#confirm-login');
-                if (await confirm.isVisible().catch(() => false)) {
-                    await confirm.click();
+                const confirmBtn = page.locator('#confirm-login');
+                if (await confirmBtn.isVisible().catch(() => false)) {
+                    await confirmBtn.click();
+                    await page.waitForTimeout(3000);
                 }
 
-                await page.waitForTimeout(5000);
-
-                // ── 获取服务器列表 ──
+                // 3. 抓取服务器列表 (增加预检)
+                await page.waitForSelector('a[href*="server-console"]', { timeout: 10000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
-                    return Array.from(document.querySelectorAll('a[href*="server-console"]'))
-                        .map(a => a.href);
+                    return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
                 });
 
-                console.log(`🔧 找到 ${serverUrls.length} 个服务器`);
-
-                for (const url of serverUrls) {
-                    console.log(`\n🔍 正在进入面板: ${url}`);
-                    await page.goto(url);
-                    
-                    // 等待面板状态加载（FreezeHost 状态有时是动态加载的）
-                    await page.waitForTimeout(6000);
-
-                    let actionResult = '';
-
-                    try {
-                        // --- 核心诊断逻辑 ---
-                        // 1. 获取页面纯文本用于正则匹配
-                        const bodyText = await page.innerText('body').catch(() => "");
-                        const hasHiberKeyword = /hibernation|sleep/i.test(bodyText);
-                        
-                        // 2. 检测关键元素
-                        const hiberTextVisible = await page.locator('text=/hibernation|sleep/i').isVisible().catch(() => false);
-                        const wakeBtn = page.locator('button:has-text("Wake Up Server")');
-                        const wakeBtnVisible = await wakeBtn.isVisible().catch(() => false);
-                        const startBtn = page.locator('button:has-text("Start Server")');
-                        const startBtnVisible = await startBtn.isVisible().catch(() => false);
-
-                        console.log(`📊 [状态检查]`);
-                        console.log(`   - 文本包含关键字 (Regex): ${hasHiberKeyword}`);
-                        console.log(`   - 关键字元素可见 (Selector): ${hiberTextVisible}`);
-                        console.log(`   - "Wake Up Server" 按钮可见: ${wakeBtnVisible}`);
-                        console.log(`   - "Start Server" 按钮可见: ${startBtnVisible}`);
-
-                        // --- 决策树 ---
-                        if (wakeBtnVisible || hiberTextVisible || hasHiberKeyword) {
-                            console.log('💤 识别到休眠状态 -> 执行唤醒');
-                            await wakeBtn.first().click();
-                            await page.waitForTimeout(10000); // 唤醒需要较长时间
-                            actionResult = '⚡ 已执行唤醒 (Wake Up)';
-                        } 
-                        else if (startBtnVisible) {
-                            console.log('🔴 识别到停止状态 -> 执行启动');
-                            await startBtn.click();
-                            await page.waitForTimeout(8000);
-
-                            // 启动后可能会瞬间变回休眠，二次检查
-                            const secondCheckHiber = await page.locator('text=/hibernation|sleep/i').isVisible().catch(() => false);
-                            if (secondCheckHiber) {
-                                console.log('💤 启动后检测到休眠 -> 追回一次唤醒');
-                                await page.locator('button:has-text("Wake Up Server")').first().click();
-                                await page.waitForTimeout(5000);
-                                actionResult = '🚀 已启动 + ⚡ 追回唤醒';
-                            } else {
-                                actionResult = '🚀 已启动 (Start)';
-                            }
-                        } 
-                        else {
-                            // 如果以上都没有，可能已经在运行，或者页面加载失败
-                            const currentStatusText = await page.locator('.status-text, #status').innerText().catch(() => "未知");
-                            console.log(`🟢 未触发操作。当前可能状态: ${currentStatusText}`);
-                            actionResult = '🟢 运行中或状态无需操作';
-                        }
-
-                    } catch (err) {
-                        actionResult = `❌ 操作异常: ${err.message}`;
-                        console.log(err);
-                    }
-
-                    result += `\n🔗 ${url.split('/').pop()}\n📝 ${actionResult}\n`;
+                if (serverUrls.length === 0) {
+                    serverResults.push(`    ⚠️ <i>未发现任何服务器实例</i>`);
                 }
 
+                for (const url of serverUrls) {
+                    totalStats.servers++;
+                    await page.goto(url, { waitUntil: 'domcontentloaded' });
+                    // 等待控制台核心元素加载，确保页面稳定
+                    await page.waitForTimeout(8000); 
+
+                    // 抓取服务器名称
+                    const serverName = await page.locator('h1').first().innerText().catch(() => 'Unknown Server');
+                    const shortId = url.split('/').pop();
+
+                    let statusEmoji = '🟢';
+                    let actionText = '运行中';
+
+                    // 状态判断
+                    const bodyText = await page.innerText('body').catch(() => "");
+                    const wakeBtn = page.locator('button:has-text("Wake Up Server")');
+                    const startBtn = page.locator('button:has-text("Start Server")');
+
+                    const isHibernating = /hibernation|sleep/i.test(bodyText) || await wakeBtn.isVisible().catch(() => false);
+                    const isOffline = await startBtn.isVisible().catch(() => false);
+
+                    if (isHibernating) {
+                        await wakeBtn.first().click();
+                        statusEmoji = '⚡';
+                        actionText = '已唤醒';
+                        totalStats.actions++;
+                        await page.waitForTimeout(5000);
+                    } else if (isOffline) {
+                        await startBtn.first().click();
+                        statusEmoji = '🚀';
+                        actionText = '已启动';
+                        totalStats.actions++;
+                        await page.waitForTimeout(5000);
+                    }
+
+                    console.log(`${statusEmoji} ${serverName} [${actionText}]`);
+                    serverResults.push(`${statusEmoji} <b>${serverName}</b> (<a href="${url}">${shortId}</a>) - <code>${actionText}</code>`);
+                }
             } catch (err) {
-                console.error(`❌ 账号处理失败: ${err.message}`);
-                result = `❌ 登录/处理失败: ${err.message}`;
+                totalStats.failed++;
+                console.error(`❌ 处理出错: ${err.message}`);
+                serverResults.push(`    ❌ 异常: <code>${err.message}</code>`);
             }
 
-            summary.push(`👤 账号${i + 1}\n${result}`);
+            accountReports.push(`👤 <b>账号 ${i + 1}</b>\n${serverResults.join('\n')}`);
             await context.close();
         }
 
+        // ── 组装发送报告 ──
         const finalText = [
-            '🎮 FreezeHost 运行报告',
-            `🕒 ${nowStr()}`,
-            '================',
-            summary.join('\n')
+            `<b>🎮 FreezeHost 运维报告</b>`,
+            `🕒 <code>${nowStr()}</code>`,
+            `────────────────────`,
+            accountReports.join('\n\n'),
+            `────────────────────`,
+            `📊 总计: <b>${totalStats.servers}</b> | 操作: <b>${totalStats.actions}</b> | 失败: <b>${totalStats.failed}</b>`,
+            `✅ <b>自动任务已完成</b>`
         ].join('\n');
 
-        console.log('\n' + finalText);
         await sendTG(finalText);
 
     } finally {
