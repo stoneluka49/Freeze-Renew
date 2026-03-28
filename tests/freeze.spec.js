@@ -63,6 +63,30 @@ function sendTG(result) {
     });
 }
 
+// 通用 Cookie 弹窗清除函数，可在登录页和控制台页复用
+async function dismissCookiePopup(page) {
+    const cookieSelectors = [
+        'button.fc-cta-consent',
+        'button.fc-button-label',
+        '[aria-label="Consent"]',
+        'button:has-text("同意")',
+        'button:has-text("Accept")',
+        'button:has-text("Agree")',
+        'button:has-text("OK")',
+    ];
+    for (const sel of cookieSelectors) {
+        try {
+            const btn = page.locator(sel).first();
+            if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
+                await btn.click({ force: true });
+                console.log(`  ✅ 已关闭 Cookie 弹窗 (${sel})`);
+                await page.waitForTimeout(500);
+                break;
+            }
+        } catch { }
+    }
+}
+
 async function handleOAuthPage(page) {
     console.log(`  📄 当前 URL: ${page.url()}`);
     await page.waitForTimeout(3000);
@@ -244,27 +268,7 @@ test('FreezeHost 自动续期', async ({}, testInfo) => {
                 await page.click('span.text-lg:has-text("Login with Discord")');
 
                 console.log('⏳ 检测并关闭 Cookie 同意弹窗...');
-                try {
-                    // FundingChoices / Google CMP 弹窗
-                    const cookieAcceptSelectors = [
-                        'button.fc-cta-consent',
-                        'button.fc-button-label',
-                        '[aria-label="Consent"]',
-                        'button:has-text("同意")',
-                        'button:has-text("Accept")',
-                        'button:has-text("Agree")',
-                        'button:has-text("OK")',
-                    ];
-                    for (const sel of cookieAcceptSelectors) {
-                        const btn = page.locator(sel).first();
-                        if (await btn.isVisible({ timeout: 1000 }).catch(() => false)) {
-                            await btn.click({ force: true });
-                            console.log(`  ✅ 已关闭 Cookie 弹窗 (${sel})`);
-                            await page.waitForTimeout(500);
-                            break;
-                        }
-                    }
-                } catch { /* 没有弹窗或已关闭，继续 */ }
+                await dismissCookiePopup(page);
 
                 console.log('⏳ 等待服务条款弹窗...');
                 const confirmBtn = page.locator('button#confirm-login');
@@ -451,12 +455,16 @@ test('FreezeHost 自动续期', async ({}, testInfo) => {
                     // ── 点击外链图标打开续期弹窗 ─────────────────────────
                     console.log('  🔍 查找续期入口...');
                     try {
+                        // 进控制台页面后也可能有 Cookie 弹窗，先清除
+                        await dismissCookiePopup(page);
+
                         // 只匹配可见的外链图标，跳过隐藏的 reviewAction 等按钮
                         const externalLinkIcon = page.locator('i.fa-external-link-alt:visible').first();
                         const parentEl = externalLinkIcon.locator('xpath=..');
                         await parentEl.waitFor({ state: 'visible', timeout: 8000 });
-                        await parentEl.hover();
-                        await page.waitForTimeout(1000);
+                        // force:true 忽略残留的遮罩层
+                        await parentEl.hover({ force: true });
+                        await page.waitForTimeout(500);
                         await externalLinkIcon.click({ force: true });
                         await page.waitForTimeout(2000);
 
@@ -498,6 +506,13 @@ test('FreezeHost 自动续期', async ({}, testInfo) => {
                         console.log(`  ❌ 处理此服务器时发生错误: ${err.message}`);
                         statusText = `❌ 异常 (${err.message.slice(0, 15)})`;
                         globalHasError = true;
+                        
+                        // 自动截取错误瞬间截图
+                        try {
+                            const safeName = serverName.replace(/[^\w\u4e00-\u9fa5-]+/g, '_');
+                            await page.screenshot({ path: `test-results/${safeName}-error.png`, fullPage: true });
+                            console.log(`  📸 已保存错误截图: test-results/${safeName}-error.png`);
+                        } catch (e) { /* 截图失败不报错 */ }
                     }
                     pushResult();
                 } // End Server Loop
@@ -505,6 +520,10 @@ test('FreezeHost 自动续期', async ({}, testInfo) => {
                 console.log(`❌ 账号 ${tIndex + 1} 发生异常: ${err.message}`);
                 allSummary.push(`${accountLabel} ❌ 登录或处理失败 (${err.message.slice(0, 30)})`);
                 globalHasError = true;
+                
+                try {
+                    await page.screenshot({ path: `test-results/account-${tIndex + 1}-error.png`, fullPage: true });
+                } catch (e) { }
             } finally {
                 await context.close();
             }
