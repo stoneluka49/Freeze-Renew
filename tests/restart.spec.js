@@ -15,7 +15,7 @@ function nowStr() {
     });
 }
 
-// ── 修复点 1：增加 Cookie 弹窗清除函数 ──
+// ── 增加 Cookie 弹窗清除函数 ──
 async function dismissCookiePopup(page) {
     const cookieSelectors = [
         'button.fc-cta-consent',
@@ -29,8 +29,8 @@ async function dismissCookiePopup(page) {
         try {
             const btn = page.locator(sel).first();
             if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
-                await btn.click({ force: true });
-                console.log(`  ✅ 已关闭 Cookie 遮罩 (${sel})`);
+                await btn.dispatchEvent('click').catch(() => btn.click({ force: true }));
+                console.log(`    ✅ 已关闭 Cookie 遮罩 (${sel})`);
                 await page.waitForTimeout(500);
                 break;
             }
@@ -59,7 +59,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
+test('FreezeHost 自动唤醒 - 强力驱动修复版', async () => {
     if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
 
     const browser = await chromium.launch({ headless: true });
@@ -75,6 +75,7 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
             let serverResults = [];
             let currentToken = tokens[i];
             
+            // 处理带前缀的 token (例如 123:ABC)
             const match = currentToken.match(/^([^#:]+)[#:](.+)$/);
             if (match) { currentToken = match[2].trim(); }
 
@@ -84,13 +85,10 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
                 // 1. Discord 登录
                 await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
                 await page.evaluate((token) => {
-                    const iframe = document.createElement('iframe');
-                    document.body.appendChild(iframe);
-                    iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
+                    localStorage.setItem('token', `"${token}"`);
                 }, currentToken);
                 
-                await page.waitForTimeout(1000);
-                await page.reload({ waitUntil: 'domcontentloaded' });
+                await page.goto('https://discord.com/app', { waitUntil: 'networkidle' });
                 await page.waitForTimeout(3000);
 
                 if (page.url().includes('login')) throw new Error('Discord Token 失效');
@@ -98,18 +96,20 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
 
                 // 2. 登录 FreezeHost
                 await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
-                
-                // 修复点 2：点击登录前先清理弹窗
                 await dismissCookiePopup(page);
-                await page.click('text=Login with Discord', { timeout: 15000 });
 
+                const loginBtn = page.locator('text=Login with Discord').first();
+                // 解决可见性报错的核心：使用 dispatchEvent
+                await loginBtn.dispatchEvent('click').catch(() => loginBtn.click({ force: true }));
+
+                await page.waitForTimeout(3000);
                 const confirmBtn = page.locator('#confirm-login');
                 if (await confirmBtn.isVisible().catch(() => false)) {
-                    await confirmBtn.click();
+                    await confirmBtn.dispatchEvent('click').catch(() => confirmBtn.click({ force: true }));
                     await page.waitForTimeout(3000);
                 }
 
-                // 3. 抓取服务器
+                // 3. 抓取服务器列表
                 await page.waitForSelector('a[href*="server-console"]', { timeout: 15000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
@@ -119,8 +119,8 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
                     totalStats.servers++;
                     await page.goto(url, { waitUntil: 'domcontentloaded' });
                     
-                    // 修复点 3：进入控制台后再次清理弹窗，并使用 force: true 点击
-                    await page.waitForTimeout(3000);
+                    // 等待页面加载及弹窗处理
+                    await page.waitForTimeout(8000); 
                     await dismissCookiePopup(page);
 
                     const serverName = await page.locator('h1, h2, .server-name').first().innerText().catch(() => 'Unknown Server');
@@ -130,25 +130,26 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
                     let actionText = '运行中';
 
                     const bodyText = await page.innerText('body').catch(() => "");
-                    const wakeBtn = page.locator('button:has-text("Wake Up Server")');
-                    const startBtn = page.locator('button:has-text("Start Server")');
+                    const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
+                    const startBtn = page.locator('button:has-text("Start Server")').first();
 
                     const isHibernating = /hibernation|sleep/i.test(bodyText) || await wakeBtn.isVisible().catch(() => false);
                     const isOffline = await startBtn.isVisible().catch(() => false);
 
                     if (isHibernating) {
-                        // 修复点 4：添加 force: true 强制穿透可能残余的透明遮罩
-                        await wakeBtn.first().click({ force: true });
+                        // 核心修复：强力派发点击
+                        await wakeBtn.dispatchEvent('click');
                         statusEmoji = '⚡';
                         actionText = '已唤醒';
                         totalStats.actions++;
-                        await page.waitForTimeout(3000);
+                        await page.waitForTimeout(5000);
                     } else if (isOffline) {
-                        await startBtn.first().click({ force: true });
+                        // 核心修复：强力派发点击
+                        await startBtn.dispatchEvent('click');
                         statusEmoji = '🚀';
                         actionText = '已启动';
                         totalStats.actions++;
-                        await page.waitForTimeout(3000);
+                        await page.waitForTimeout(5000);
                     }
 
                     console.log(`${statusEmoji} ${serverName} [${actionText}]`);
@@ -157,7 +158,7 @@ test('FreezeHost 自动唤醒 - 稳定加固版', async () => {
             } catch (err) {
                 totalStats.failed++;
                 console.error(`❌ 处理出错: ${err.message}`);
-                serverResults.push(`    ❌ 异常: <code>${err.message.slice(0, 50)}</code>`);
+                serverResults.push(`    ❌ 异常: <code>${err.message.slice(0, 60)}</code>`);
             }
 
             accountReports.push(`👤 <b>账号 ${i + 1}</b>\n${serverResults.join('\n')}`);
