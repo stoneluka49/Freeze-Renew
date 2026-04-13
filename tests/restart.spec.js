@@ -75,29 +75,37 @@ test('FreezeHost 自动唤醒 - 最终加固版', async () => {
             let serverResults = [];
             let currentToken = tokens[i];
             
-            // 解析带前缀的 token (兼容 1:XXXX 或 XXXX)
+            // 解析带前缀的 token
             const match = currentToken.match(/^([^#:]+)[#:](.+)$/);
             if (match) { currentToken = match[2].trim(); }
 
             console.log(`\n🚀 [${i + 1}/${tokens.length}] 正在处理账号...`);
 
             try {
-                // 1. Discord 登录 (修复 localStorage 报错)
-                // 必须先进入域名，localStorage 才会存在于上下文中
+                // 1. Discord 登录
+                // 重点：先加载登录页
                 await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
-                
+                await page.waitForTimeout(2000);
+
+                // 核心注入逻辑：双重写入 + 状态确保
                 await page.evaluate((token) => {
-                    // 确保在 window 上下文执行
-                    if (typeof window !== 'undefined' && window.localStorage) {
-                        window.localStorage.setItem('token', `"${token}"`);
+                    function setData(t) {
+                        localStorage.setItem('token', `"${t}"`);
+                        localStorage.setItem('tokens', `["${t}"]`); // 备用字段
                     }
+                    setData(token);
                 }, currentToken);
                 
-                // 注入后跳转验证
+                // 关键点：注入后先 reload 同域页面，再跳转到 app
+                await page.reload({ waitUntil: 'domcontentloaded' });
                 await page.goto('https://discord.com/app', { waitUntil: 'networkidle' });
-                await page.waitForTimeout(4000);
+                await page.waitForTimeout(5000);
 
-                if (page.url().includes('login')) throw new Error('Token 注入未生效或已失效');
+                // 验证跳转结果
+                const currentUrl = page.url();
+                if (currentUrl.includes('login')) {
+                    throw new Error('Token 无效或被 Discord 拦截');
+                }
                 console.log('✅ Discord 登录成功');
 
                 // 2. 授权登录 FreezeHost
@@ -105,17 +113,16 @@ test('FreezeHost 自动唤醒 - 最终加固版', async () => {
                 await dismissCookiePopup(page);
 
                 const loginBtn = page.locator('text=Login with Discord').first();
-                // 使用强力派发点击
                 await loginBtn.dispatchEvent('click').catch(() => loginBtn.click({ force: true }));
 
-                await page.waitForTimeout(4000);
+                await page.waitForTimeout(5000);
                 const confirmBtn = page.locator('#confirm-login');
                 if (await confirmBtn.isVisible().catch(() => false)) {
                     await confirmBtn.dispatchEvent('click').catch(() => confirmBtn.click({ force: true }));
-                    await page.waitForTimeout(3000);
+                    await page.waitForTimeout(4000);
                 }
 
-                // 3. 抓取并处理服务器
+                // 3. 处理服务器
                 await page.waitForSelector('a[href*="server-console"]', { timeout: 15000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
@@ -125,10 +132,10 @@ test('FreezeHost 自动唤醒 - 最终加固版', async () => {
                     totalStats.servers++;
                     await page.goto(url, { waitUntil: 'domcontentloaded' });
                     
-                    await page.waitForTimeout(8000); // 等待面板状态加载
+                    await page.waitForTimeout(8000); 
                     await dismissCookiePopup(page);
 
-                    const serverName = await page.locator('h1, h2, .server-name').first().innerText().catch(() => 'Unknown Server');
+                    const serverName = await page.locator('h1, h2, .server-name').first().innerText().catch(() => 'Unknown');
                     const shortId = url.split('/').pop();
 
                     let statusEmoji = '🟢';
@@ -175,7 +182,7 @@ test('FreezeHost 自动唤醒 - 最终加固版', async () => {
             accountReports.join('\n\n'),
             `────────────────────`,
             `📊 总计: <b>${totalStats.servers}</b> | 操作: <b>${totalStats.actions}</b> | 失败: <b>${totalStats.failed}</b>`,
-            `✅ <b>自动任务完成</b>`
+            `✅ <b>任务已完成</b>`
         ].join('\n');
 
         await sendTG(finalText);
