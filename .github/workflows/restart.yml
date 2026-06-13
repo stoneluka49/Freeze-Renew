@@ -1,0 +1,42 @@
+name: Run Restart Script
+
+on:
+  schedule:
+    # 保留原有的定时触发：每天北京时间早上 8 点和晚上 8 点自动运行
+    - cron: '0 0,12 * * *'
+  workflow_dispatch: # 保留手动触发按钮
+  
+  # ── 核心修复：支持远程工作流事件调用 ──
+  workflow_run:
+    workflows: ["remote-restart-event"] # 监听的远程/外部工作流名称
+    types:
+      - completed # 当该工作流执行完毕时触发
+
+jobs:
+  restart-task:
+    runs-on: ubuntu-latest
+    # 增加安全过滤：只有当 remote-restart-event 成功完成，或者是由定时/手动触发时才运行
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Dependencies
+      run: |
+        npm init -y
+        npm install @playwright/test
+
+    - name: Install Playwright Chromium Browser
+      run: npx playwright install chromium --with-deps
+
+    - name: Run Playwright Script
+      env:
+        DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+        TG_BOT: ${{ secrets.TG_BOT }}
+      run: npx playwright test restart.spec.js
