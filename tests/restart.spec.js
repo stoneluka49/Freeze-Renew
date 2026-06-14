@@ -36,7 +36,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
+test('FreezeHost 自动唤醒 - 严格状态分支版', async () => {
     if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
 
     const browser = await chromium.launch({ headless: true });
@@ -83,7 +83,7 @@ test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
                     await page.waitForTimeout(3000);
                 }
 
-                // 3. 服务器控制与精准唤醒
+                // 3. 服务器控制逻辑
                 await page.waitForSelector('a[href*="server-console"]', { timeout: 15000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
@@ -93,11 +93,11 @@ test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
                     totalStats.servers++;
                     await page.goto(url);
                     
-                    // 核心改动：等待 WebSocket 握手和面板状态渲染完成（关键）
+                    // 等待 WebSocket 握手和面板状态渲染
                     await page.waitForSelector('span:has-text("Connected"), .server-name, h1', { timeout: 15000 }).catch(() => {});
                     await page.waitForTimeout(6000); 
 
-                    // 精准抓取真正的服务器名字，避开页脚的 "Enjoying FreezeHost?" 干扰
+                    // 精准抓取服务器名字
                     const serverName = await page.locator('h1').first().innerText()
                         .catch(() => page.locator('.server-name').first().innerText())
                         .catch(() => 'Unknown Server');
@@ -107,31 +107,77 @@ test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
                     let statusEmoji = '🟢';
                     let actionText = '运行中';
 
-                    // 重新匹配 FreezeHost 新版面板的按钮选择器
-                    const wakeBtn = page.locator('button:has-text("Wake Up"), button:has-text("Wake Up Server")').first();
+                    // 公用按钮/状态文本定位器定义
+                    const wakeBtn = page.locator('button:has-text("WAKE UP"), button:has-text("Wake Up")').first();
                     const startBtn = page.locator('button:has-text("START"), button:has-text("Start")').first();
+                    const restartBtn = page.locator('button:has-text("RESTART"), button:has-text("Restart")').first();
                     
-                    // 抓取状态区的文本
-                    const statusText = await page.locator('div:has-text("OFFLINE"), div:has-text("HIBERNATING"), div:has-text("SLEEP")').first().innerText().catch(() => "");
-                    const isOfflineText = /OFFLINE/i.test(statusText);
+                    // 抓取大状态卡片区文本 (精确区分 RUNNING 或 OFFLINE)
+                    const statusCardText = await page.locator('div:has-text("RUNNING"), div:has-text("OFFLINE")').first().innerText().catch(() => "");
+                    const isRunning = /RUNNING/i.test(statusCardText);
+                    const isOffline = /OFFLINE/i.test(statusCardText);
 
-                    // 优先判断是否可见，次选文本分析
-                    if (await wakeBtn.isVisible().catch(() => false)) {
-                        await wakeBtn.dispatchEvent('click');
-                        statusEmoji = '⚡';
-                        actionText = '已唤醒';
-                        totalStats.actions++;
-                        await page.waitForTimeout(5000);
-                    } else if (await startBtn.isVisible().catch(() => false) || isOfflineText) {
-                        // 命中截图中的 OFFLINE 状态，强行派发点击给蓝色 START 按钮
+                    console.log(`[${serverName.trim()}] 面板检测大状态: ${isRunning ? 'RUNNING' : isOffline ? 'OFFLINE' : 'UNKNOWN'}`);
+
+                    // ── 分支 1：如果是 RUNNING ──
+                    if (isRunning) {
+                        // 检查是否有 wake up 按钮
+                        if (await wakeBtn.isVisible().catch(() => false)) {
+                            console.log(`  └─ 🟡 发现 Wake Up 按钮，执行唤醒。`);
+                            await wakeBtn.dispatchEvent('click');
+                            statusEmoji = '⚡';
+                            actionText = '已唤醒';
+                            totalStats.actions++;
+                            await page.waitForTimeout(5000);
+                        } else {
+                            // 没有 wake up 按钮，则执行 restart server
+                            console.log(`  └─ 🔄 未发现 Wake Up 按钮，直接执行 Restart 重启。`);
+                            if (await restartBtn.isVisible().catch(() => false)) {
+                                await restartBtn.dispatchEvent('click');
+                            } else {
+                                // 如果没找到特定重启键，尝试强制派发给可能存在的同名动作键
+                                await page.locator('button:has-text("RESTART")').first().dispatchEvent('click').catch(() => {});
+                            }
+                            statusEmoji = '🔄';
+                            actionText = '已重启服务器';
+                            totalStats.actions++;
+                            await page.waitForTimeout(5000);
+                        }
+                    } 
+                    // ── 分支 2：如果是 OFFLINE ──
+                    else if (isOffline || await startBtn.isVisible().catch(() => false)) {
+                        console.log(`  └─ 🔴 状态为 OFFLINE，正在点击 START 启动...`);
                         await startBtn.dispatchEvent('click');
                         statusEmoji = '🚀';
                         actionText = '已启动';
                         totalStats.actions++;
-                        await page.waitForTimeout(5000);
+                        
+                        // 启动后强制等待 8 秒让面板同步状态流
+                        await page.waitForTimeout(8000); 
+
+                        // 【二次检查】启动后看需不需要 wake up
+                        const bodyTextAfterStart = await page.innerText('body').catch(() => "");
+                        const isHibernatingText = /HIBERNATION|⚡/i.test(bodyTextAfterStart);
+
+                        if (await wakeBtn.isVisible().catch(() => false) || isHibernatingText) {
+                            console.log(`     └─ ⚡ 二次检查触发：启动后检测到休眠，紧接着执行 Wake Up 唤醒！`);
+                            await wakeBtn.dispatchEvent('click');
+                            statusEmoji = '⚡';
+                            actionText = '已启动并唤醒';
+                            await page.waitForTimeout(5000);
+                        }
+                    } else {
+                        // 未识别到明确大状态的兜底安全处理
+                        console.log(`  └─ ⚠️ 未检测到明确的大状态文本，执行常规安全唤醒检测...`);
+                        if (await wakeBtn.isVisible().catch(() => false)) {
+                            await wakeBtn.dispatchEvent('click');
+                            statusEmoji = '⚡';
+                            actionText = '常规唤醒';
+                            totalStats.actions++;
+                        }
                     }
 
-                    console.log(`${statusEmoji} ${serverName.trim()} [${actionText}]`);
+                    console.log(`[Result] ${statusEmoji} ${serverName.trim()} -> ${actionText}`);
                     serverResults.push(`${statusEmoji} <b>${serverName.trim()}</b> (<code>${shortId}</code>) - <code>${actionText}</code>`);
                 }
             } catch (err) {
