@@ -36,7 +36,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
+test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
     if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
 
     const browser = await chromium.launch({ headless: true });
@@ -52,14 +52,13 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
             let serverResults = [];
             let currentToken = tokens[i];
             
-            // 兼容可能带备注的格式
             const match = currentToken.match(/^([^#:]+)[#:](.+)$/);
             if (match) { currentToken = match[2].trim(); }
 
             console.log(`\n🚀 [${i + 1}/${tokens.length}] 正在处理账号...`);
 
             try {
-                // 1. 原始 Discord 注入方式
+                // 1. Discord 登录
                 await page.goto('https://discord.com/login');
                 await page.evaluate((token) => {
                     const iframe = document.createElement('iframe');
@@ -75,7 +74,6 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
 
                 // 2. 登录 FreezeHost
                 await page.goto('https://free.freezehost.pro');
-                // 修复：使用强制点击进入 Discord 授权
                 await page.locator('text=Login with Discord').first().dispatchEvent('click');
 
                 await page.waitForTimeout(5000);
@@ -85,7 +83,7 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
                     await page.waitForTimeout(3000);
                 }
 
-                // 3. 服务器唤醒模块 (重点修复)
+                // 3. 服务器控制与精准唤醒
                 await page.waitForSelector('a[href*="server-console"]', { timeout: 15000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
@@ -94,27 +92,38 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
                 for (const url of serverUrls) {
                     totalStats.servers++;
                     await page.goto(url);
-                    await page.waitForTimeout(8000); // 给足面板加载时间
+                    
+                    // 核心改动：等待 WebSocket 握手和面板状态渲染完成（关键）
+                    await page.waitForSelector('span:has-text("Connected"), .server-name, h1', { timeout: 15000 }).catch(() => {});
+                    await page.waitForTimeout(6000); 
 
-                    const serverName = await page.locator('h1, h2, .server-name').first().innerText().catch(() => 'Unknown');
+                    // 精准抓取真正的服务器名字，避开页脚的 "Enjoying FreezeHost?" 干扰
+                    const serverName = await page.locator('h1').first().innerText()
+                        .catch(() => page.locator('.server-name').first().innerText())
+                        .catch(() => 'Unknown Server');
+                        
                     const shortId = url.split('/').pop();
 
                     let statusEmoji = '🟢';
                     let actionText = '运行中';
 
-                    // 状态判断
-                    const bodyText = await page.innerText('body').catch(() => "");
-                    const wakeBtn = page.locator('button:has-text("Wake Up Server")').first();
-                    const startBtn = page.locator('button:has-text("Start Server")').first();
+                    // 重新匹配 FreezeHost 新版面板的按钮选择器
+                    const wakeBtn = page.locator('button:has-text("Wake Up"), button:has-text("Wake Up Server")').first();
+                    const startBtn = page.locator('button:has-text("START"), button:has-text("Start")').first();
+                    
+                    // 抓取状态区的文本
+                    const statusText = await page.locator('div:has-text("OFFLINE"), div:has-text("HIBERNATING"), div:has-text("SLEEP")').first().innerText().catch(() => "");
+                    const isOfflineText = /OFFLINE/i.test(statusText);
 
-                    // 核心修复：强制派发点击事件，解决 Element is not visible
-                    if (/hibernation|sleep/i.test(bodyText) || await wakeBtn.isVisible().catch(() => false)) {
+                    // 优先判断是否可见，次选文本分析
+                    if (await wakeBtn.isVisible().catch(() => false)) {
                         await wakeBtn.dispatchEvent('click');
                         statusEmoji = '⚡';
                         actionText = '已唤醒';
                         totalStats.actions++;
                         await page.waitForTimeout(5000);
-                    } else if (await startBtn.isVisible().catch(() => false)) {
+                    } else if (await startBtn.isVisible().catch(() => false) || isOfflineText) {
+                        // 命中截图中的 OFFLINE 状态，强行派发点击给蓝色 START 按钮
                         await startBtn.dispatchEvent('click');
                         statusEmoji = '🚀';
                         actionText = '已启动';
@@ -122,8 +131,8 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
                         await page.waitForTimeout(5000);
                     }
 
-                    console.log(`${statusEmoji} ${serverName} [${actionText}]`);
-                    serverResults.push(`${statusEmoji} <b>${serverName}</b> (<code>${shortId}</code>) - <code>${actionText}</code>`);
+                    console.log(`${statusEmoji} ${serverName.trim()} [${actionText}]`);
+                    serverResults.push(`${statusEmoji} <b>${serverName.trim()}</b> (<code>${shortId}</code>) - <code>${actionText}</code>`);
                 }
             } catch (err) {
                 totalStats.failed++;
@@ -135,7 +144,6 @@ test('FreezeHost 自动唤醒 - 核心模块修复版', async () => {
             await context.close();
         }
 
-        // 组装报告
         const finalText = [
             `<b>🎮 FreezeHost 运维报告</b>`,
             `🕒 <code>${nowStr()}</code>`,
