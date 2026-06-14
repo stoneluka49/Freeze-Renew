@@ -8,7 +8,7 @@ on:
   
   # ── 核心修复：支持远程工作流事件调用 ──
   workflow_run:
-    workflows: ["remote-restart-event"] # 监听的远程/外部工作流名称
+    workflows: [remote-restart-event] # 监听的远程/外部工作流名称
     types:
       - completed # 当该工作流执行完毕时触发
 
