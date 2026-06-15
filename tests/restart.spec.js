@@ -15,30 +15,6 @@ function nowStr() {
     });
 }
 
-// ── 核心加固：Cookie 弹窗与遮罩层强行清除函数 ──
-async function dismissPopups(page) {
-    const popupSelectors = [
-        'button.fc-cta-consent',
-        'button.fc-button-label',
-        '[aria-label="Consent"]',
-        'button:has-text("同意")',
-        'button:has-text("Accept")',
-        'button:has-text("OK")',
-        '.modal-close',
-        '#close-btn'
-    ];
-    for (const sel of popupSelectors) {
-        try {
-            const btn = page.locator(sel).first();
-            if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
-                await btn.dispatchEvent('click').catch(() => btn.click({ force: true }));
-                console.log(`   [Sentry] 已尝试关闭潜在遮罩层: (${sel})`);
-                await page.waitForTimeout(500);
-            }
-        } catch { }
-    }
-}
-
 function sendTG(text) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) return resolve();
@@ -60,7 +36,7 @@ function sendTG(text) {
     });
 }
 
-test('FreezeHost 自动唤醒 - 严格状态分支强力版', async () => {
+test('FreezeHost 自动唤醒 - 状态精准判别版', async () => {
     if (tokens.length === 0) throw new Error('❌ 未配置 DISCORD_TOKEN');
 
     const browser = await chromium.launch({ headless: true });
@@ -83,37 +59,31 @@ test('FreezeHost 自动唤醒 - 严格状态分支强力版', async () => {
 
             try {
                 // 1. Discord 登录
-                await page.goto('https://discord.com/login', { waitUntil: 'domcontentloaded' });
+                await page.goto('https://discord.com/login');
                 await page.evaluate((token) => {
                     const iframe = document.createElement('iframe');
                     document.body.appendChild(iframe);
                     iframe.contentWindow.localStorage.setItem('token', `"${token}"`);
                 }, currentToken);
                 
-                await page.reload({ waitUntil: 'domcontentloaded' });
-                await page.waitForTimeout(6000);
+                await page.reload();
+                await page.waitForTimeout(5000);
 
                 if (page.url().includes('login')) throw new Error('Discord 登录失败');
                 console.log('✅ Discord 登录成功');
 
                 // 2. 登录 FreezeHost
-                await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
-                await page.waitForTimeout(3000); // 留出一点缓冲防止卡死
-                await dismissPopups(page); // 强行清理干扰弹窗
+                await page.goto('https://free.freezehost.pro');
+                await page.locator('text=Login with Discord').first().dispatchEvent('click');
 
-                // 强力定位登录按钮并派发点击事件
-                const loginBtn = page.locator('text=Login with Discord').first();
-                await loginBtn.waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
-                await loginBtn.dispatchEvent('click');
-
-                await page.waitForTimeout(6000);
+                await page.waitForTimeout(5000);
                 const confirmBtn = page.locator('#confirm-login');
                 if (await confirmBtn.isVisible().catch(() => false)) {
                     await confirmBtn.dispatchEvent('click');
-                    await page.waitForTimeout(4000);
+                    await page.waitForTimeout(3000);
                 }
 
-                // 3. 服务器控制逻辑
+                // 3. 服务器控制与精准唤醒
                 await page.waitForSelector('a[href*="server-console"]', { timeout: 15000 }).catch(() => {});
                 const serverUrls = await page.evaluate(() => {
                     return Array.from(document.querySelectorAll('a[href*="server-console"]')).map(a => a.href);
@@ -121,14 +91,13 @@ test('FreezeHost 自动唤醒 - 严格状态分支强力版', async () => {
 
                 for (const url of serverUrls) {
                     totalStats.servers++;
-                    await page.goto(url, { waitUntil: 'domcontentloaded' });
+                    await page.goto(url);
                     
-                    // 等待 WebSocket 握手和面板状态渲染
+                    // 核心改动：等待 WebSocket 握手和面板状态渲染完成（关键）
                     await page.waitForSelector('span:has-text("Connected"), .server-name, h1', { timeout: 15000 }).catch(() => {});
-                    await page.waitForTimeout(8000); // 稍微延长面板稳定时间
-                    await dismissPopups(page); // 强行清理面板可能存在的弹窗干扰
+                    await page.waitForTimeout(6000); 
 
-                    // 精准抓取服务器名字
+                    // 精准抓取真正的服务器名字，避开页脚的 "Enjoying FreezeHost?" 干扰
                     const serverName = await page.locator('h1').first().innerText()
                         .catch(() => page.locator('.server-name').first().innerText())
                         .catch(() => 'Unknown Server');
@@ -138,78 +107,31 @@ test('FreezeHost 自动唤醒 - 严格状态分支强力版', async () => {
                     let statusEmoji = '🟢';
                     let actionText = '运行中';
 
-                    // 公用按钮/状态文本定位器定义
-                    const wakeBtn = page.locator('button:has-text("WAKE UP"), button:has-text("Wake Up")').first();
+                    // 重新匹配 FreezeHost 新版面板的按钮选择器
+                    const wakeBtn = page.locator('button:has-text("Wake Up"), button:has-text("Wake Up Server")').first();
                     const startBtn = page.locator('button:has-text("START"), button:has-text("Start")').first();
-                    const restartBtn = page.locator('button:has-text("RESTART"), button:has-text("Restart")').first();
                     
-                    // 抓取大状态卡片区文本 (精确区分 RUNNING 或 OFFLINE)
-                    const statusCardText = await page.locator('div:has-text("RUNNING"), div:has-text("OFFLINE")').first().innerText().catch(() => "");
-                    const isRunning = /RUNNING/i.test(statusCardText);
-                    const isOffline = /OFFLINE/i.test(statusCardText);
+                    // 抓取状态区的文本
+                    const statusText = await page.locator('div:has-text("OFFLINE"), div:has-text("HIBERNATING"), div:has-text("SLEEP")').first().innerText().catch(() => "");
+                    const isOfflineText = /OFFLINE/i.test(statusText);
 
-                    console.log(`[${serverName.trim()}] 面板检测大状态: ${isRunning ? 'RUNNING' : isOffline ? 'OFFLINE' : 'UNKNOWN'}`);
-
-                    // ── 分支 1：如果是 RUNNING ──
-                    if (isRunning) {
-                        // 检查是否有 wake up 按钮
-                        if (await wakeBtn.isVisible().catch(() => false)) {
-                            console.log(`  └─ 🟡 发现 Wake Up 按钮，执行强力唤醒。`);
-                            // 核心修复：彻底抛弃常规 click 动作，改用绝对穿透的 dispatchEvent
-                            await wakeBtn.dispatchEvent('click');
-                            statusEmoji = '⚡';
-                            actionText = '已唤醒';
-                            totalStats.actions++;
-                            await page.waitForTimeout(5000);
-                        } else {
-                            // 没有 wake up 按钮，则执行 restart server
-                            console.log(`  └─ 🔄 未发现 Wake Up 按钮，直接执行 Restart 重启。`);
-                            if (await restartBtn.isVisible().catch(() => false)) {
-                                await restartBtn.dispatchEvent('click');
-                            } else {
-                                await page.locator('button:has-text("RESTART")').first().dispatchEvent('click').catch(() => {});
-                            }
-                            statusEmoji = '🔄';
-                            actionText = '已重启服务器';
-                            totalStats.actions++;
-                            await page.waitForTimeout(5000);
-                        }
-                    } 
-                    // ── 分支 2：如果是 OFFLINE ──
-                    else if (isOffline || await startBtn.isVisible().catch(() => false)) {
-                        console.log(`  └─ 🔴 状态为 OFFLINE，正在启动...`);
+                    // 优先判断是否可见，次选文本分析
+                    if (await wakeBtn.isVisible().catch(() => false)) {
+                        await wakeBtn.dispatchEvent('click');
+                        statusEmoji = '⚡';
+                        actionText = '已唤醒';
+                        totalStats.actions++;
+                        await page.waitForTimeout(5000);
+                    } else if (await startBtn.isVisible().catch(() => false) || isOfflineText) {
+                        // 命中截图中的 OFFLINE 状态，强行派发点击给蓝色 START 按钮
                         await startBtn.dispatchEvent('click');
                         statusEmoji = '🚀';
                         actionText = '已启动';
                         totalStats.actions++;
-                        
-                        // 启动后强制等待 8 秒让面板同步状态流并重新拉取弹窗清除
-                        await page.waitForTimeout(8000); 
-                        await dismissPopups(page);
-
-                        // 【二次检查】启动后看需不需要 wake up
-                        const bodyTextAfterStart = await page.innerText('body').catch(() => "");
-                        const isHibernatingText = /HIBERNATION|⚡/i.test(bodyTextAfterStart);
-
-                        if (await wakeBtn.isVisible().catch(() => false) || isHibernatingText) {
-                            console.log(`     └─ ⚡ 二次检查触发：启动后检测到休眠，执行强力 Wake Up 唤醒！`);
-                            await wakeBtn.dispatchEvent('click');
-                            statusEmoji = '⚡';
-                            actionText = '已启动并唤醒';
-                            await page.waitForTimeout(5000);
-                        }
-                    } else {
-                        // 未识别到明确大状态的兜底安全处理
-                        console.log(`  └─ ⚠️ 未检测到明确的大状态文本，执行常规安全唤醒检测...`);
-                        if (await wakeBtn.isVisible().catch(() => false)) {
-                            await wakeBtn.dispatchEvent('click');
-                            statusEmoji = '⚡';
-                            actionText = '常规唤醒';
-                            totalStats.actions++;
-                        }
+                        await page.waitForTimeout(5000);
                     }
 
-                    console.log(`[Result] ${statusEmoji} ${serverName.trim()} -> ${actionText}`);
+                    console.log(`${statusEmoji} ${serverName.trim()} [${actionText}]`);
                     serverResults.push(`${statusEmoji} <b>${serverName.trim()}</b> (<code>${shortId}</code>) - <code>${actionText}</code>`);
                 }
             } catch (err) {
